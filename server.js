@@ -33,8 +33,8 @@ app.get("/login", (req, res) => {
     response_type: "code",
     client_id: process.env.CLIENT_ID,
     scope,
-    redirect_uri: process.env.REDIRECT_URI + `?user=${req.query.user}`,
-  })}`;
+    redirect_uri: "https://lyro-spotify-1.onrender.com/callback"
+})}`;
 
   return res.redirect(redirect);
 });
