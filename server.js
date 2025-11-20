@@ -59,12 +59,32 @@ app.get("/callback", async (req, res) => {
     );
 
     const { access_token, refresh_token } = tokenReq.data;
+const fs = require("fs");
+const path = require("path");
 
-    res.send(`
-      <h1>🎉 Successfully Logged In</h1>
-      <p>User ID: ${user}</p>
-      <pre>${JSON.stringify({ access_token, refresh_token }, null, 2)}</pre>
-    `);
+const savePath = path.join(__dirname, "public/tokens", `${user}.json`);
+
+fs.writeFileSync(
+  savePath,
+  JSON.stringify(
+    {
+      userId: user,
+      access_token,
+      refresh_token,
+      spotifyURL: profile.data.external_urls.spotify,
+      expires_in: tokenReq.data.expires_in,
+      lastUpdated: Date.now()
+    },
+    null,
+    2
+  )
+);
+
+return res.send(`
+  <h1>🎉 Spotify Login Successful</h1>
+  <p>You may now return to Discord!</p>
+`);
+    
   } catch (err) {
     console.log(err.response?.data || err);
     return res.send("❌ Error fetching tokens");
