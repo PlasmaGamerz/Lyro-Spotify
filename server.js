@@ -1,54 +1,70 @@
 const express = require("express");
 const axios = require("axios");
 const qs = require("qs");
+const cors = require("cors");
 const fs = require("fs");
 const path = require("path");
+
 require("dotenv").config();
 
 const app = express();
-const port = process.env.PORT || 3000;
+const PORT = process.env.PORT || 3000;
 
-// Ensure tokens folder exists
-const TOKENS_DIR = path.join(__dirname, "public", "tokens");
-if (!fs.existsSync(TOKENS_DIR)) fs.mkdirSync(TOKENS_DIR, { recursive: true });
+// Fix Render proxy issues
+app.set("trust proxy", 1);
 
+app.use(cors());
+app.use(express.json());
+app.use(express.urlencoded({ extended: true }));
+
+// CONSTS
+const TOKEN_DIR = path.join(__dirname, "public", "tokens");
+
+// Create folder if not exists
+if (!fs.existsSync(TOKEN_DIR)) fs.mkdirSync(TOKEN_DIR, { recursive: true });
+
+/* ============================================================
+   HOME PAGE
+===============================================================*/
 app.get("/", (req, res) => {
   res.send("Lyro Spotify OAuth Server Running ✔️");
 });
 
-/* ============================
-        LOGIN ENDPOINT
-   ============================ */
+/* ============================================================
+   LOGIN (user MUST be passed from bot)
+===============================================================*/
 app.get("/login", (req, res) => {
-  const user = req.query.user;
-  if (!user) return res.send("❌ No user ID provided.");
+  const userId = req.query.user;
 
-  const scopes = [
+  if (!userId) return res.send("❌ No user ID provided");
+
+  const scope = [
     "user-read-email",
     "user-read-private",
     "playlist-read-private",
     "playlist-read-collaborative"
   ].join(" ");
 
-  const redirect_url = "https://accounts.spotify.com/authorize?" + qs.stringify({
+  const authUrl = `https://accounts.spotify.com/authorize?${qs.stringify({
     response_type: "code",
     client_id: process.env.CLIENT_ID,
-    scope: scopes,
-    redirect_uri: process.env.REDIRECT_URI + `?user=${user}`,
-    state: user
-  });
+    redirect_uri: `${process.env.REDIRECT_URI}?user=${userId}`,
+    scope,
+    state: userId
+  })}`;
 
-  return res.redirect(redirect_url);
+  return res.redirect(authUrl);
 });
 
-/* ============================
-        CALLBACK ENDPOINT
-   ============================ */
+/* ============================================================
+   CALLBACK (Spotify redirects here after login)
+===============================================================*/
 app.get("/callback", async (req, res) => {
   const code = req.query.code;
-  const user = req.query.user;
+  const userId = req.query.user; // important
 
-  if (!code || !user) return res.send("❌ Missing code or user.");
+  if (!code || !userId)
+    return res.send("❌ Missing code or user ID (Callback broken)");
 
   try {
     const tokenRes = await axios.post(
@@ -56,96 +72,99 @@ app.get("/callback", async (req, res) => {
       qs.stringify({
         grant_type: "authorization_code",
         code,
-        redirect_uri: process.env.REDIRECT_URI + `?user=${user}`,
+        redirect_uri: `${process.env.REDIRECT_URI}?user=${userId}`,
         client_id: process.env.CLIENT_ID,
         client_secret: process.env.CLIENT_SECRET
       }),
       { headers: { "Content-Type": "application/x-www-form-urlencoded" } }
     );
 
-    const data = {
-      access_token: tokenRes.data.access_token,
-      refresh_token: tokenRes.data.refresh_token,
-      expires_at: Date.now() + tokenRes.data.expires_in * 1000
-    };
+    const data = tokenRes.data;
 
-    // Save tokens
+    // Add expiry time
+    data.expires_at = Date.now() + data.expires_in * 1000;
+
+    // Save tokens to file
     fs.writeFileSync(
-      path.join(TOKENS_DIR, `${user}.json`),
+      path.join(TOKEN_DIR, `${userId}.json`),
       JSON.stringify(data, null, 2)
     );
 
     return res.send(`
-      <h1>🎉 Spotify Login Successful!</h1>
-      <p>Your Lyro bot is now linked to your Spotify profile.</p>
-      <p>You may now close this page.</p>
+      <h1>🎉 Spotify Login Successful</h1>
+      <p>You can now return to Discord!</p>
+      <pre>${JSON.stringify(data, null, 2)}</pre>
     `);
   } catch (err) {
-    console.error(err.response?.data || err);
-    return res.send("❌ Error fetching tokens.");
+    console.error("Callback Error:", err.response?.data || err);
+    return res.send("❌ Error exchanging code for tokens");
   }
 });
 
-/* ============================
-     TOKEN FETCH (for BOT)
-   ============================ */
+/* ============================================================
+   BOT FETCH TOKENS
+===============================================================*/
 app.get("/gettokens", (req, res) => {
-  const user = req.query.user;
-  if (!user) return res.status(400).json({ error: "No user ID" });
+  const userId = req.query.user;
+  if (!userId) return res.status(400).json({ error: "No user ID" });
 
-  const filePath = path.join(TOKENS_DIR, `${user}.json`);
-  if (!fs.existsSync(filePath))
-    return res.status(404).json({ error: "User not logged in" });
+  const file = path.join(TOKEN_DIR, `${userId}.json`);
+  if (!fs.existsSync(file))
+    return res.status(404).json({ error: "Tokens not found" });
 
-  const data = JSON.parse(fs.readFileSync(filePath));
-
+  const data = JSON.parse(fs.readFileSync(file, "utf8"));
   return res.json(data);
 });
 
-/* ============================
-    AUTO TOKEN REFRESH
-   ============================ */
-async function autoRefreshTokens() {
-  const files = fs.readdirSync(TOKENS_DIR).filter(f => f.endsWith(".json"));
+/* ============================================================
+   AUTO REFRESH TOKENS
+===============================================================*/
+setInterval(async () => {
+  const files = fs.readdirSync(TOKEN_DIR).filter(f => f.endsWith(".json"));
+  if (files.length === 0) return;
+
+  console.log("🔄 Auto Refresh: Checking all Spotify tokens...");
 
   for (const file of files) {
-    const userId = file.split(".")[0];
-    const filePath = path.join(TOKENS_DIR, file);
-    const data = JSON.parse(fs.readFileSync(filePath));
-
-    if (!data.refresh_token) continue;
-
-    // If token expires in next 10 minutes → refresh now
-    if (Date.now() < data.expires_at - 10 * 60 * 1000) continue;
-
     try {
-      const res = await axios.post(
+      const userId = file.replace(".json", "");
+      const filePath = path.join(TOKEN_DIR, file);
+      const tokenData = JSON.parse(fs.readFileSync(filePath, "utf8"));
+
+      if (!tokenData.refresh_token) continue;
+
+      const now = Date.now();
+      const expires = tokenData.expires_at || 0;
+
+      if (now < expires - 60000) continue; // refresh 1 min early
+
+      const response = await axios.post(
         "https://accounts.spotify.com/api/token",
         qs.stringify({
           grant_type: "refresh_token",
-          refresh_token: data.refresh_token,
+          refresh_token: tokenData.refresh_token,
           client_id: process.env.CLIENT_ID,
           client_secret: process.env.CLIENT_SECRET
         }),
         { headers: { "Content-Type": "application/x-www-form-urlencoded" } }
       );
 
-      data.access_token = res.data.access_token;
-      data.expires_at = Date.now() + res.data.expires_in * 1000;
+      tokenData.access_token = response.data.access_token;
+      tokenData.expires_at = Date.now() + response.data.expires_in * 1000;
 
-      // Write updated tokens
-      fs.writeFileSync(filePath, JSON.stringify(data, null, 2));
+      fs.writeFileSync(filePath, JSON.stringify(tokenData, null, 2));
 
-      console.log(`✔ Refreshed token for ${userId}`);
+      console.log(`🔄 Refreshed token for user ${userId}`);
+
     } catch (err) {
-      console.error(`❌ Failed refreshing ${userId}:`, err.response?.data || err);
+      console.error("❌ Failed to refresh token:", err.response?.data || err);
     }
   }
-}
+}, 40 * 60 * 1000); // every 40 minutes
 
-// Run every 5 minutes
-setInterval(autoRefreshTokens, 5 * 60 * 1000);
-
-app.listen(port, () => {
-  console.log(`Lyro Spotify OAuth Server is running on port ${port}`);
+/* ============================================================
+   START SERVER
+===============================================================*/
+app.listen(PORT, () => {
+  console.log(`🎧 Lyro Spotify OAuth Server running on PORT ${PORT}`);
 });
