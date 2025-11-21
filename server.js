@@ -109,6 +109,25 @@ app.get("/gettokens", (req, res) => {
 });
 
 /* ============================================================
+   DELETE TOKENS (For Unlink Command)
+===============================================================*/
+app.get("/deletetokens", (req, res) => {
+  const userId = req.query.user;
+
+  if (!userId)
+    return res.status(400).json({ error: "No user ID provided" });
+
+  const filePath = path.join(TOKEN_DIR, `${userId}.json`);
+
+  if (!fs.existsSync(filePath))
+    return res.status(404).json({ error: "User is not linked" });
+
+  fs.unlinkSync(filePath);
+
+  return res.json({ success: true, message: "Spotify account unlinked" });
+});
+
+/* ============================================================
    AUTO TOKEN REFRESH
 ===============================================================*/
 setInterval(async () => {
